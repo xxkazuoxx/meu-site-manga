@@ -1,0 +1,81 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Local secrets and environment overrides; keep the safe template versioned.
+.env
+.env.*
+!.env.example
+
+# Local application state, generated uploads, and recovery material.
+/data/*.db
+/data/*.db-*
+/data/*.sqlite
+/data/*.sqlite-*
+/data/upload-staging/
+/backups/
+/quarentena-manga-uploads/
+
+# Runtime-uploaded chapter pages are local data. Keep the official sample pages.
+/public/manga-uploads/*
+!/public/manga-uploads/luz-entre-sombras/
+/public/manga-uploads/luz-entre-sombras/*
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/
+/public/manga-uploads/luz-entre-sombras/capitulo-1/*
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-001.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-002.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-003.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-004.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-005.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-006.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-007.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-008.webp
+!/public/manga-uploads/luz-entre-sombras/capitulo-1/pagina-009.webp
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Backups locais de versões anteriores
+*.antes-*
+
+# Arquivo antigo local
+/c
+
+# Lista local de backup de uploads
+/manga-uploads-backup-list.txt
+
+# Backups locais do código
+*.backup
+*-backup.*
+*.funcionando.*
+
+# Memória local do OpenClaw
+/memory/
+
+# Versoes antigas especificas
+*.zoom-backup
+*.capitulo-*-funcionando.*
+*.capitulos-*-funcionando.*
+*.data-funcionando.*
+*.funcionando-agora.*
+
+# Backups com extensao apos o nome
+*.backup.*
