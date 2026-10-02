@@ -1597,6 +1597,143 @@ app.get('/api/mangas', (_req, res) => {
 })
 
 /* ================================
+   API ADMINISTRATIVA DE MANGÁS
+================================ */
+
+app.post(
+  '/api/admin/mangas',
+  requireAdmin,
+  (req, res) => {
+    const {
+      id: rawId,
+      title: rawTitle,
+      volume: rawVolume,
+      description: rawDescription,
+      cover: rawCover,
+      slug: rawSlug,
+    } = req.body ?? {}
+
+    if (
+      typeof rawId !== 'string' ||
+      typeof rawTitle !== 'string' ||
+      typeof rawSlug !== 'string'
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID, título e slug são obrigatórios.',
+      })
+    }
+
+    const manga = {
+      id: rawId.trim(),
+      title: rawTitle.trim(),
+      volume: rawVolume == null ? null : rawVolume,
+      description: rawDescription == null ? null : rawDescription,
+      cover: rawCover == null ? null : rawCover,
+      slug: rawSlug.trim(),
+    }
+
+    if (
+      !manga.id ||
+      !manga.title ||
+      !manga.slug ||
+      manga.id.length > 100 ||
+      manga.title.length > 200 ||
+      manga.slug.length > 100 ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(manga.slug)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Informe ID, título e slug válidos.',
+      })
+    }
+
+    for (const field of ['volume', 'description', 'cover']) {
+      if (manga[field] != null && typeof manga[field] !== 'string') {
+        return res.status(400).json({
+          success: false,
+          error: 'Volume, descrição e capa devem ser textos.',
+        })
+      }
+
+      if (typeof manga[field] === 'string') {
+        manga[field] = manga[field].trim() || null
+      }
+    }
+
+    if (
+      (manga.volume?.length ?? 0) > 120 ||
+      (manga.description?.length ?? 0) > 5000 ||
+      (manga.cover?.length ?? 0) > 1000
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Um ou mais campos excedem o tamanho permitido.',
+      })
+    }
+
+    try {
+      const duplicate = db.prepare(`
+        SELECT id, slug
+        FROM mangas
+        WHERE id = ? OR slug = ?
+      `).get(manga.id, manga.slug)
+
+      if (duplicate) {
+        return res.status(409).json({
+          success: false,
+          error: 'Já existe um mangá com esse ID ou slug.',
+        })
+      }
+
+      db.prepare(`
+        INSERT INTO mangas (
+          id,
+          title,
+          volume,
+          description,
+          cover,
+          slug
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        manga.id,
+        manga.title,
+        manga.volume,
+        manga.description,
+        manga.cover,
+        manga.slug
+      )
+
+      return res.status(201).json({
+        success: true,
+        manga: {
+          ...manga,
+          chapters: [],
+        },
+      })
+    } catch (error) {
+      if (error.code?.startsWith('SQLITE_CONSTRAINT')) {
+        return res.status(409).json({
+          success: false,
+          error: 'Já existe um mangá com esse ID ou slug.',
+        })
+      }
+
+      console.error(
+        'Erro ao criar mangá:',
+        error.code || 'CREATE_MANGA_FAILED'
+      )
+
+      return res.status(500).json({
+        success: false,
+        error: 'Não foi possível criar o mangá.',
+      })
+    }
+  }
+)
+
+/* ================================
    API ADMINISTRATIVA DE CAPÍTULOS
 ================================ */
 

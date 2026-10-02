@@ -19,6 +19,30 @@ function AdminPage() {
   const [loginLoading, setLoginLoading] =
     useState(false)
 
+  const [newMangaId, setNewMangaId] =
+    useState('')
+
+  const [newMangaTitle, setNewMangaTitle] =
+    useState('')
+
+  const [newMangaVolume, setNewMangaVolume] =
+    useState('')
+
+  const [newMangaDescription, setNewMangaDescription] =
+    useState('')
+
+  const [newMangaCover, setNewMangaCover] =
+    useState('')
+
+  const [newMangaSlug, setNewMangaSlug] =
+    useState('')
+
+  const [creatingManga, setCreatingManga] =
+    useState(false)
+
+  const [createMangaError, setCreateMangaError] =
+    useState('')
+
   useEffect(() => {
     async function checkAdminSession() {
       try {
@@ -217,6 +241,80 @@ function AdminPage() {
       (chapter) =>
         chapter.slug === selectedChapterSlug
     )
+
+  async function createManga(event) {
+    event.preventDefault()
+
+    setCreateMangaError('')
+
+    if (
+      !newMangaId.trim() ||
+      !newMangaTitle.trim() ||
+      !newMangaSlug.trim()
+    ) {
+      setCreateMangaError(
+        'ID, título e slug são obrigatórios.'
+      )
+      return
+    }
+
+    setCreatingManga(true)
+
+    try {
+      const response = await fetch(
+        apiUrl('/admin/mangas'),
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: newMangaId.trim(),
+            title: newMangaTitle.trim(),
+            volume: newMangaVolume.trim(),
+            description:
+              newMangaDescription.trim(),
+            cover: newMangaCover.trim(),
+            slug: newMangaSlug.trim(),
+          }),
+        }
+      )
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          result.error ||
+            'Não foi possível criar o mangá.'
+        )
+      }
+
+      const data = await fetchMangaData()
+
+      setMangas(data.mangas || [])
+
+      setNewMangaId('')
+      setNewMangaTitle('')
+      setNewMangaVolume('')
+      setNewMangaDescription('')
+      setNewMangaCover('')
+      setNewMangaSlug('')
+      setCreateMangaError('')
+    } catch (error) {
+      console.error(
+        'Erro ao criar mangá:',
+        error
+      )
+
+      setCreateMangaError(
+        error.message ||
+          'Não foi possível criar o mangá.'
+      )
+    } finally {
+      setCreatingManga(false)
+    }
+  }
 
   function updateMangas(updater) {
     setMangas((currentMangas) => {
@@ -1144,7 +1242,143 @@ function AdminPage() {
         </header>
 
         <section className="admin-section">
-          <h2>Meus mangás</h2>
+          <div className="admin-section-header">
+            <h2>Meus mangás</h2>
+
+            <button
+              type="button"
+              onClick={() => {
+                setCreateMangaError('')
+              }}
+            >
+              + Novo mangá
+            </button>
+          </div>
+
+          <form
+            className="admin-manga-create-form"
+            onSubmit={createManga}
+          >
+            <h3>Novo mangá</h3>
+
+            <div>
+              <label htmlFor="new-manga-id">
+                ID
+              </label>
+
+              <input
+                id="new-manga-id"
+                type="text"
+                value={newMangaId}
+                onChange={(event) =>
+                  setNewMangaId(event.target.value)
+                }
+                placeholder="ex.: meu-manga"
+                disabled={creatingManga}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-manga-title">
+                Título
+              </label>
+
+              <input
+                id="new-manga-title"
+                type="text"
+                value={newMangaTitle}
+                onChange={(event) =>
+                  setNewMangaTitle(event.target.value)
+                }
+                placeholder="Título do mangá"
+                disabled={creatingManga}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-manga-volume">
+                Volume
+              </label>
+
+              <input
+                id="new-manga-volume"
+                type="text"
+                value={newMangaVolume}
+                onChange={(event) =>
+                  setNewMangaVolume(event.target.value)
+                }
+                placeholder="ex.: Vol. 1"
+                disabled={creatingManga}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-manga-description">
+                Descrição
+              </label>
+
+              <textarea
+                id="new-manga-description"
+                value={newMangaDescription}
+                onChange={(event) =>
+                  setNewMangaDescription(
+                    event.target.value
+                  )
+                }
+                placeholder="Descrição do mangá"
+                disabled={creatingManga}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-manga-cover">
+                Capa
+              </label>
+
+              <input
+                id="new-manga-cover"
+                type="text"
+                value={newMangaCover}
+                onChange={(event) =>
+                  setNewMangaCover(event.target.value)
+                }
+                placeholder="/manga/meu-manga/capa.png"
+                disabled={creatingManga}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="new-manga-slug">
+                Slug
+              </label>
+
+              <input
+                id="new-manga-slug"
+                type="text"
+                value={newMangaSlug}
+                onChange={(event) =>
+                  setNewMangaSlug(event.target.value)
+                }
+                placeholder="meu-manga"
+                disabled={creatingManga}
+              />
+            </div>
+
+            {createMangaError && (
+              <p className="comments-error">
+                {createMangaError}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={creatingManga}
+            >
+              {creatingManga
+                ? 'Criando...'
+                : 'Criar mangá'}
+            </button>
+          </form>
 
           <div className="admin-manga-list">
             {mangas.map((manga) => (
