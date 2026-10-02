@@ -1,4 +1,4 @@
-const API_PREFIX = '/api'
+const API_PREFIX = 'https://luz-entre-sombras-server.onrender.com/api'
 
 export function apiUrl(path) {
   const normalizedPath = path.startsWith('/')
