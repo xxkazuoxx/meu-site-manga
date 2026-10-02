@@ -13,7 +13,7 @@ import db from './database.js'
 
 const app = express()
 const PORT = Number(process.env.PORT || 3001)
-const HOST = process.env.HOST || '127.0.0.1'
+const HOST = process.env.HOST || '0.0.0.0'
 
 const uploadDirectory = path.join(
   process.cwd(),
