@@ -408,6 +408,8 @@ const upload = multer({
    SESSÃO DE ADMINISTRAÇÃO
 ================================ */
 
+app.set('trust proxy', 1)
+
 if (
   !process.env.SESSION_SECRET ||
   !process.env.ADMIN_USERNAME ||
