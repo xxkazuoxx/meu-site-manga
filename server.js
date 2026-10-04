@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'path'
 import fs from 'fs'
-import db from './database.js'
+import { query as pgQuery } from './database-pg.js'
 
 const app = express()
 const PORT = Number(process.env.PORT || 3001)
@@ -139,7 +139,6 @@ function resolveUploadFile(url) {
   return { filePath, exists: true }
 }
 
-db.pragma('foreign_keys = ON')
 const extensionByMimeType = {
   'image/webp': ['.webp'],
   'image/png': ['.png'],
@@ -674,7 +673,7 @@ app.post(
 
     return next()
   },
-  (req, res) => {
+  async (req, res) => {
     const files = req.files?.pages ?? []
     const legacyFiles = req.files?.page ?? []
     const uploadedFiles = files.length > 0
@@ -723,18 +722,18 @@ app.post(
         return reject(400, 'ID do capítulo inválido.')
       }
 
-      const chapter = db
-        .prepare(`
-          SELECT
-            chapters.id,
-            chapters.slug AS chapter_slug,
-            mangas.slug AS manga_slug
-          FROM chapters
-          JOIN mangas
-            ON mangas.id = chapters.manga_id
-          WHERE chapters.id = ?
-        `)
-        .get(chapterId)
+      const chapterResult = await pgQuery(`
+        SELECT
+          chapters.id,
+          chapters.slug AS chapter_slug,
+          mangas.slug AS manga_slug
+        FROM chapters
+        JOIN mangas
+          ON mangas.id = chapters.manga_id
+        WHERE chapters.id = $1
+      `, [chapterId])
+
+      const chapter = chapterResult.rows[0]
 
       if (!chapter) {
         return reject(404, 'Capítulo não encontrado.')
@@ -753,13 +752,13 @@ app.post(
 
       const duplicateIndexes = []
       const knownHashes = new Set()
-      const existingPages = db
-        .prepare(`
-          SELECT url
-          FROM pages
-          WHERE chapter_id = ?
-        `)
-        .all(chapterId)
+      const existingPagesResult = await pgQuery(`
+        SELECT url
+        FROM pages
+        WHERE chapter_id = $1
+      `, [chapterId])
+
+      const existingPages = existingPagesResult.rows
 
       for (const page of existingPages) {
         const existingFile = resolveUploadFile(page.url)
@@ -814,40 +813,42 @@ app.post(
         fs.unlinkSync(file.path)
       }
 
-      const insertPages = db.prepare(`
-        INSERT INTO pages (
-          chapter_id,
-          page_number,
-          url
-        )
-        VALUES (?, ?, ?)
-      `)
+      const nextPageResult = await pgQuery(`
+        SELECT COALESCE(MAX(page_number), 0) + 1 AS next_page
+        FROM pages
+        WHERE chapter_id = $1
+      `, [chapterId])
 
-      const savedPages = db.transaction(() => {
-        const nextPageNumber = db
-          .prepare(`
-            SELECT COALESCE(MAX(page_number), 0) + 1 AS next_page
-            FROM pages
-            WHERE chapter_id = ?
-          `)
-          .get(chapterId).next_page
+      const nextPageNumber = Number(
+        nextPageResult.rows[0].next_page
+      )
 
-        return pagesToInsert.map((page, index) => {
-          const pageNumber = nextPageNumber + index
-          const result = insertPages.run(
-            chapterId,
-            pageNumber,
-            page.url
+      const savedPages = []
+
+      for (const [index, page] of pagesToInsert.entries()) {
+        const pageNumber = nextPageNumber + index
+
+        const result = await pgQuery(`
+          INSERT INTO pages (
+            chapter_id,
+            page_number,
+            url
           )
+          VALUES ($1, $2, $3)
+          RETURNING id
+        `, [
+          chapterId,
+          pageNumber,
+          page.url,
+        ])
 
-          return {
-            id: Number(result.lastInsertRowid),
-            pageNumber,
-            url: page.url,
-            filename: page.filename,
-          }
+        savedPages.push({
+          id: Number(result.rows[0].id),
+          pageNumber,
+          url: page.url,
+          filename: page.filename,
         })
-      })()
+      }
       databaseCommitted = true
 
       res.json({
@@ -903,7 +904,7 @@ app.post(
 app.post(
   '/api/delete-page',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     const { url } = req.body
 
     let uploadFile
@@ -929,58 +930,56 @@ app.post(
       })
     }
 
-    const page = db
-      .prepare(`
+    try {
+      const pageResult = await pgQuery(`
         SELECT id
         FROM pages
-        WHERE url = ?
-      `)
-      .get(url)
+        WHERE url = $1
+      `, [url])
 
-    if (!page) {
-      return res.status(404).json({
-        error:
-          'Página não encontrada.',
-      })
-    }
+      const page = pageResult.rows[0]
 
-    let fileContents = null
-    let fileExisted = uploadFile.exists
+      if (!page) {
+        return res.status(404).json({
+          error:
+            'Página não encontrada.',
+        })
+      }
 
-    if (fileExisted) {
-      try {
-        fileContents = fs.readFileSync(
-          uploadFile.filePath
-        )
-      } catch (error) {
-        if (error.code === 'ENOENT') {
-          fileExisted = false
-        } else {
-          console.error(
-            'Erro ao ler página antes da exclusão:',
-            error
+      let fileContents = null
+      let fileExisted = uploadFile.exists
+
+      if (fileExisted) {
+        try {
+          fileContents = fs.readFileSync(
+            uploadFile.filePath
           )
+        } catch (error) {
+          if (error.code === 'ENOENT') {
+            fileExisted = false
+          } else {
+            console.error(
+              'Erro ao ler página antes da exclusão:',
+              error
+            )
 
-          return res.status(500).json({
-            error:
-              'Não foi possível preparar a exclusão da página.',
-          })
+            return res.status(500).json({
+              error:
+                'Não foi possível preparar a exclusão da página.',
+            })
+          }
         }
       }
-    }
 
-    let fileDeleted = false
+      let fileDeleted = false
 
-    try {
-      const deletePage = db.prepare(`
-        DELETE FROM pages
-        WHERE id = ? AND url = ?
-      `)
+      try {
+        const deleteResult = await pgQuery(`
+          DELETE FROM pages
+          WHERE id = $1 AND url = $2
+        `, [page.id, url])
 
-      const deletePageAndFile = db.transaction(() => {
-        const result = deletePage.run(page.id, url)
-
-        if (result.changes !== 1) {
+        if (deleteResult.rowCount !== 1) {
           const error = new Error(
             'O registro da página mudou durante a exclusão.'
           )
@@ -1000,44 +999,52 @@ app.post(
             fileExisted = false
           }
         }
-      })
-
-      deletePageAndFile()
-    } catch (error) {
-      if (
-        fileContents &&
-        !fs.existsSync(uploadFile.filePath)
-      ) {
-        try {
-          fs.writeFileSync(
-            uploadFile.filePath,
-            fileContents,
-            { flag: 'wx' }
-          )
-        } catch (restoreError) {
-          console.error(
-            'Não foi possível restaurar a página após falha na transação:',
-            restoreError
-          )
+      } catch (error) {
+        if (
+          fileContents &&
+          !fs.existsSync(uploadFile.filePath)
+        ) {
+          try {
+            fs.writeFileSync(
+              uploadFile.filePath,
+              fileContents,
+              { flag: 'wx' }
+            )
+          } catch (restoreError) {
+            console.error(
+              'Não foi possível restaurar a página após falha na exclusão:',
+              restoreError
+            )
+          }
         }
+
+        console.error(
+          'Erro ao excluir página:',
+          error
+        )
+
+        return res.status(error.status || 500).json({
+          error:
+            'Não foi possível concluir a exclusão da página.',
+        })
       }
 
+      return res.json({
+        success: true,
+        recordDeleted: true,
+        fileDeleted,
+      })
+    } catch (error) {
       console.error(
         'Erro ao excluir página:',
         error
       )
 
-      return res.status(error.status || 500).json({
+      return res.status(500).json({
         error:
           'Não foi possível concluir a exclusão da página.',
       })
     }
-
-    return res.json({
-      success: true,
-      recordDeleted: true,
-      fileDeleted,
-    })
   }
 )
 
@@ -1048,7 +1055,7 @@ app.post(
 app.delete(
   '/api/admin/chapters/:id',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const chapterId = Number(
         req.params.id
@@ -1064,15 +1071,15 @@ app.delete(
         })
       }
 
-      const chapter = db
-        .prepare(`
-          SELECT
-            id,
-            title
-          FROM chapters
-          WHERE id = ?
-        `)
-        .get(chapterId)
+      const chapterResult = await pgQuery(`
+        SELECT
+          id,
+          title
+        FROM chapters
+        WHERE id = $1
+      `, [chapterId])
+
+      const chapter = chapterResult.rows[0]
 
       if (!chapter) {
         return res.status(404).json({
@@ -1081,16 +1088,14 @@ app.delete(
         })
       }
 
-      const pages = db
-        .prepare(`
-          SELECT url
-          FROM pages
-          WHERE chapter_id = ?
-          ORDER BY page_number
-        `)
-        .all(chapterId)
+      const pagesResult = await pgQuery(`
+        SELECT url
+        FROM pages
+        WHERE chapter_id = $1
+        ORDER BY page_number
+      `, [chapterId])
 
-      for (const page of pages) {
+      for (const page of pagesResult.rows) {
         if (
           typeof page.url !== 'string' ||
           !page.url.startsWith(
@@ -1100,21 +1105,23 @@ app.delete(
           continue
         }
 
-        const filename = path.basename(
-          page.url
-        )
+        const uploadFile =
+          resolveUploadFile(page.url)
 
-        if (!filename) {
+        if (!uploadFile) {
+          console.error(
+            'Caminho de página inválido durante exclusão:',
+            page.url
+          )
           continue
         }
 
-        const filePath = path.join(
-          uploadDirectory,
-          filename
-        )
+        if (!uploadFile.exists) {
+          continue
+        }
 
         try {
-          fs.unlinkSync(filePath)
+          fs.unlinkSync(uploadFile.filePath)
         } catch (error) {
           if (error.code !== 'ENOENT') {
             throw error
@@ -1122,10 +1129,17 @@ app.delete(
         }
       }
 
-      db.prepare(`
+      const deleteResult = await pgQuery(`
         DELETE FROM chapters
-        WHERE id = ?
-      `).run(chapterId)
+        WHERE id = $1
+      `, [chapterId])
+
+      if (deleteResult.rowCount !== 1) {
+        return res.status(409).json({
+          error:
+            'O capítulo mudou durante a exclusão.',
+        })
+      }
 
       res.json({
         success: true,
@@ -1152,7 +1166,7 @@ app.delete(
 /*
   Criar comentário ou resposta
 */
-app.post('/api/comments', (req, res) => {
+app.post('/api/comments', async (req, res) => {
   try {
     const {
       mangaId,
@@ -1204,13 +1218,13 @@ app.post('/api/comments', (req, res) => {
       parentId !== null &&
       parentId !== undefined
     ) {
-      const parent = db
-        .prepare(
-          'SELECT id FROM comments WHERE id = ?'
-        )
-        .get(parentId)
+      const parentResult = await pgQuery(`
+        SELECT id
+        FROM comments
+        WHERE id = $1
+      `, [parentId])
 
-      if (!parent) {
+      if (parentResult.rowCount === 0) {
         return res.status(400).json({
           error:
             'O comentário ao qual você está respondendo não existe.',
@@ -1218,7 +1232,7 @@ app.post('/api/comments', (req, res) => {
       }
     }
 
-    const statement = db.prepare(`
+    const result = await pgQuery(`
       INSERT INTO comments (
         manga_id,
         chapter_slug,
@@ -1226,24 +1240,19 @@ app.post('/api/comments', (req, res) => {
         author_name,
         content
       )
-      VALUES (?, ?, ?, ?, ?)
-    `)
-
-    const result = statement.run(
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [
       String(mangaId),
       chapterSlug
         ? String(chapterSlug)
         : null,
       parentId ?? null,
       cleanName,
-      cleanContent
-    )
+      cleanContent,
+    ])
 
-    const comment = db
-      .prepare(
-        'SELECT * FROM comments WHERE id = ?'
-      )
-      .get(result.lastInsertRowid)
+    const comment = result.rows[0]
 
     res.status(201).json({
       success: true,
@@ -1262,10 +1271,11 @@ app.post('/api/comments', (req, res) => {
   }
 })
 
+
 /*
   Listar comentários públicos
 */
-app.get('/api/comments', (req, res) => {
+app.get('/api/comments', async (req, res) => {
   try {
     const {
       mangaId,
@@ -1279,36 +1289,34 @@ app.get('/api/comments', (req, res) => {
       })
     }
 
-    let comments
+    let result
 
     if (chapterSlug) {
-      comments = db
-        .prepare(`
-          SELECT *
-          FROM comments
-          WHERE manga_id = ?
-            AND chapter_slug = ?
-          ORDER BY created_at ASC, id ASC
-        `)
-        .all(
-          String(mangaId),
-          String(chapterSlug)
-        )
+      result = await pgQuery(`
+        SELECT *
+        FROM comments
+        WHERE manga_id = $1
+          AND chapter_slug = $2
+        ORDER BY created_at ASC, id ASC
+      `, [
+        String(mangaId),
+        String(chapterSlug),
+      ])
     } else {
-      comments = db
-        .prepare(`
-          SELECT *
-          FROM comments
-          WHERE manga_id = ?
-            AND chapter_slug IS NULL
-          ORDER BY created_at ASC, id ASC
-        `)
-        .all(String(mangaId))
+      result = await pgQuery(`
+        SELECT *
+        FROM comments
+        WHERE manga_id = $1
+          AND chapter_slug IS NULL
+        ORDER BY created_at ASC, id ASC
+      `, [
+        String(mangaId),
+      ])
     }
 
     res.json({
       success: true,
-      comments,
+      comments: result.rows,
     })
   } catch (error) {
     console.error(
@@ -1323,6 +1331,7 @@ app.get('/api/comments', (req, res) => {
   }
 })
 
+
 /* ================================
    ADMINISTRAÇÃO DE COMENTÁRIOS
 ================================ */
@@ -1333,34 +1342,32 @@ app.get('/api/comments', (req, res) => {
 app.get(
   '/api/admin/comments',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const { mangaId } = req.query
 
-      let comments
+      let result
 
       if (mangaId) {
-        comments = db
-          .prepare(`
-            SELECT *
-            FROM comments
-            WHERE manga_id = ?
-            ORDER BY created_at ASC, id ASC
-          `)
-          .all(String(mangaId))
+        result = await pgQuery(`
+          SELECT *
+          FROM comments
+          WHERE manga_id = $1
+          ORDER BY created_at ASC, id ASC
+        `, [
+          String(mangaId),
+        ])
       } else {
-        comments = db
-          .prepare(`
-            SELECT *
-            FROM comments
-            ORDER BY created_at ASC, id ASC
-          `)
-          .all()
+        result = await pgQuery(`
+          SELECT *
+          FROM comments
+          ORDER BY created_at ASC, id ASC
+        `)
       }
 
       res.json({
         success: true,
-        comments,
+        comments: result.rows,
       })
     } catch (error) {
       console.error(
@@ -1376,13 +1383,14 @@ app.get(
   }
 )
 
+
 /*
   Alterar status do comentário
 */
 app.patch(
   '/api/admin/comments/:id/status',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const commentId =
         Number(req.params.id)
@@ -1406,32 +1414,32 @@ app.patch(
         })
       }
 
-      const existingComment = db
-        .prepare(
-          'SELECT id FROM comments WHERE id = ?'
-        )
-        .get(commentId)
+      const existingCommentResult = await pgQuery(`
+        SELECT id
+        FROM comments
+        WHERE id = $1
+      `, [commentId])
 
-      if (!existingComment) {
+      if (existingCommentResult.rowCount === 0) {
         return res.status(404).json({
           error:
             'Comentário não encontrado.',
         })
       }
 
-      db.prepare(`
+      const commentResult = await pgQuery(`
         UPDATE comments
         SET
-          status = ?,
+          status = $1,
           updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(status, commentId)
+        WHERE id = $2
+        RETURNING *
+      `, [
+        status,
+        commentId,
+      ])
 
-      const comment = db
-        .prepare(
-          'SELECT * FROM comments WHERE id = ?'
-        )
-        .get(commentId)
+      const comment = commentResult.rows[0]
 
       res.json({
         success: true,
@@ -1451,13 +1459,14 @@ app.patch(
   }
 )
 
+
 /*
   Excluir comentário
 */
 app.delete(
   '/api/admin/comments/:id',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const commentId =
         Number(req.params.id)
@@ -1469,27 +1478,32 @@ app.delete(
         })
       }
 
-      const existingComment = db
-        .prepare(
-          'SELECT id FROM comments WHERE id = ?'
-        )
-        .get(commentId)
+      const existingCommentResult =
+        await pgQuery(`
+          SELECT id
+          FROM comments
+          WHERE id = $1
+        `, [commentId])
 
-      if (!existingComment) {
+      if (existingCommentResult.rowCount === 0) {
         return res.status(404).json({
           error:
             'Comentário não encontrado.',
         })
       }
 
-      const deleteComment =
-        db.transaction(() => {
-          db.prepare(
-            'DELETE FROM comments WHERE id = ?'
-          ).run(commentId)
-        })
+      const deleteResult =
+        await pgQuery(`
+          DELETE FROM comments
+          WHERE id = $1
+        `, [commentId])
 
-      deleteComment()
+      if (deleteResult.rowCount !== 1) {
+        return res.status(409).json({
+          error:
+            'O comentário mudou durante a exclusão.',
+        })
+      }
 
       res.json({
         success: true,
@@ -1510,75 +1524,73 @@ app.delete(
   }
 )
 
+
 /* ================================
    API PÚBLICA DE MANGÁS
 ================================ */
 
-app.get('/api/mangas', (_req, res) => {
+app.get('/api/mangas', async (_req, res) => {
   try {
-    const mangas = db
-      .prepare(`
+    const mangasResult = await pgQuery(`
+      SELECT
+        id,
+        title,
+        volume,
+        description,
+        cover,
+        slug
+      FROM mangas
+      ORDER BY id
+    `)
+
+    const result = []
+
+    for (const manga of mangasResult.rows) {
+      const chaptersResult = await pgQuery(`
         SELECT
           id,
+          number,
           title,
-          volume,
-          description,
-          cover,
-          slug
-        FROM mangas
-        ORDER BY id
-      `)
-      .all()
+          slug,
+          reader_url
+        FROM chapters
+        WHERE manga_id = $1
+        ORDER BY number
+      `, [manga.id])
 
-    const getChapters = db.prepare(`
-      SELECT
-        id,
-        number,
-        title,
-        slug,
-        reader_url
-      FROM chapters
-      WHERE manga_id = ?
-      ORDER BY number
-    `)
+      const chapters = []
 
-    const getPages = db.prepare(`
-      SELECT
-        id,
-        page_number,
-        url
-      FROM pages
-      WHERE chapter_id = ?
-      ORDER BY page_number
-    `)
+      for (const chapter of chaptersResult.rows) {
+        const pagesResult = await pgQuery(`
+          SELECT
+            id,
+            page_number,
+            url
+          FROM pages
+          WHERE chapter_id = $1
+          ORDER BY page_number
+        `, [chapter.id])
 
-    const result = mangas.map((manga) => {
-  const chapters = getChapters
-    .all(manga.id)
-    .map((chapter) => {
-      const chapterPages =
-        getPages.all(chapter.id)
-
-      return {
-        id: chapter.id,
-        number: chapter.number,
-        title: chapter.title,
-        slug: chapter.slug,
-        readerUrl: chapter.reader_url,
-        pages: chapterPages.map(
-          (page) => page.url
-        ),
-        pageIds: chapterPages.map(
-          (page) => page.id
-        ),
+        chapters.push({
+          id: chapter.id,
+          number: chapter.number,
+          title: chapter.title,
+          slug: chapter.slug,
+          readerUrl: chapter.reader_url,
+          pages: pagesResult.rows.map(
+            (page) => page.url
+          ),
+          pageIds: pagesResult.rows.map(
+            (page) => page.id
+          ),
+        })
       }
-    })
 
-      return {
+      result.push({
         ...manga,
         chapters,
-      }
-    })
+      })
+    }
 
     res.json({
       mangas: result,
@@ -1603,7 +1615,7 @@ app.get('/api/mangas', (_req, res) => {
 app.post(
   '/api/admin/mangas',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     const {
       id: rawId,
       title: rawTitle,
@@ -1673,20 +1685,21 @@ app.post(
     }
 
     try {
-      const duplicate = db.prepare(`
+      const duplicate = await pgQuery(`
         SELECT id, slug
         FROM mangas
-        WHERE id = ? OR slug = ?
-      `).get(manga.id, manga.slug)
+        WHERE id = $1 OR slug = $2
+        LIMIT 1
+      `, [manga.id, manga.slug])
 
-      if (duplicate) {
+      if (duplicate.rows.length > 0) {
         return res.status(409).json({
           success: false,
           error: 'Já existe um mangá com esse ID ou slug.',
         })
       }
 
-      db.prepare(`
+      await pgQuery(`
         INSERT INTO mangas (
           id,
           title,
@@ -1695,15 +1708,15 @@ app.post(
           cover,
           slug
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [
         manga.id,
         manga.title,
         manga.volume,
         manga.description,
         manga.cover,
-        manga.slug
-      )
+        manga.slug,
+      ])
 
       return res.status(201).json({
         success: true,
@@ -1713,7 +1726,9 @@ app.post(
         },
       })
     } catch (error) {
-      if (error.code?.startsWith('SQLITE_CONSTRAINT')) {
+      if (
+        error.code === '23505'
+      ) {
         return res.status(409).json({
           success: false,
           error: 'Já existe um mangá com esse ID ou slug.',
@@ -1740,7 +1755,7 @@ app.post(
 app.post(
   '/api/admin/chapters',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const {
         mangaId,
@@ -1761,13 +1776,13 @@ app.post(
         })
       }
 
-      const manga = db
-        .prepare(`
-          SELECT id, slug
-          FROM mangas
-          WHERE id = ?
-        `)
-        .get(mangaId)
+      const mangaResult = await pgQuery(`
+        SELECT id, slug
+        FROM mangas
+        WHERE id = $1
+      `, [mangaId])
+
+      const manga = mangaResult.rows[0]
 
       if (!manga) {
         return res.status(404).json({
@@ -1775,16 +1790,14 @@ app.post(
         })
       }
 
-      const existingChapter = db
-        .prepare(`
-          SELECT id
-          FROM chapters
-          WHERE manga_id = ?
-            AND slug = ?
-        `)
-        .get(mangaId, slug)
+      const existingChapterResult = await pgQuery(`
+        SELECT id
+        FROM chapters
+        WHERE manga_id = $1
+          AND slug = $2
+      `, [mangaId, slug])
 
-      if (existingChapter) {
+      if (existingChapterResult.rows.length > 0) {
         return res.status(409).json({
           error:
             'Já existe um capítulo com esse slug.',
@@ -1794,37 +1807,30 @@ app.post(
       const readerUrl =
         `/manga/${manga.slug}/${slug}`
 
-      const result = db
-        .prepare(`
-          INSERT INTO chapters (
-            manga_id,
-            number,
-            title,
-            slug,
-            reader_url
-          )
-          VALUES (?, ?, ?, ?, ?)
-        `)
-        .run(
-          mangaId,
-          Number(number),
+      const result = await pgQuery(`
+        INSERT INTO chapters (
+          manga_id,
+          number,
           title,
           slug,
-          readerUrl
+          reader_url
         )
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING
+          id,
+          number,
+          title,
+          slug,
+          reader_url
+      `, [
+        mangaId,
+        Number(number),
+        title,
+        slug,
+        readerUrl,
+      ])
 
-      const chapter = db
-        .prepare(`
-          SELECT
-            id,
-            number,
-            title,
-            slug,
-            reader_url
-          FROM chapters
-          WHERE id = ?
-        `)
-        .get(result.lastInsertRowid)
+      const chapter = result.rows[0]
 
       res.status(201).json({
         success: true,
@@ -1838,6 +1844,13 @@ app.post(
         },
       })
     } catch (error) {
+      if (error.code === '23505') {
+        return res.status(409).json({
+          error:
+            'Já existe um capítulo com esse slug.',
+        })
+      }
+
       console.error(
         'Erro ao criar capítulo:',
         error
@@ -1858,7 +1871,7 @@ app.post(
 app.patch(
   '/api/admin/chapters/:chapterId/pages/order',
   requireAdmin,
-  (req, res) => {
+  async (req, res) => {
     try {
       const chapterId = Number(
         req.params.chapterId
@@ -1921,14 +1934,14 @@ app.patch(
         })
       }
 
-      const pages = db
-        .prepare(`
-          SELECT id
-          FROM pages
-          WHERE chapter_id = ?
-          ORDER BY page_number
-        `)
-        .all(chapterId)
+      const pagesResult = await pgQuery(`
+        SELECT id
+        FROM pages
+        WHERE chapter_id = $1
+        ORDER BY page_number
+      `, [chapterId])
+
+      const pages = pagesResult.rows
 
       if (
         pages.length !==
@@ -1962,41 +1975,38 @@ app.patch(
         })
       }
 
-      const updatePageNumber =
-        db.prepare(`
-          UPDATE pages
-          SET page_number = ?
-          WHERE id = ?
-            AND chapter_id = ?
-        `)
+      const reorderPages = async () => {
+        // Primeiro usamos números temporários negativos
+        // para evitar conflito com a restrição UNIQUE.
+        for (const [index, pageId] of normalizedIds.entries()) {
+          await pgQuery(`
+            UPDATE pages
+            SET page_number = $1
+            WHERE id = $2
+              AND chapter_id = $3
+          `, [
+            -(index + 1),
+            pageId,
+            chapterId,
+          ])
+        }
 
-      const reorderPages =
-  db.transaction(() => {
-    // Primeiro usamos números temporários negativos
-    // para evitar conflito com a restrição UNIQUE.
-    normalizedIds.forEach(
-      (pageId, index) => {
-        updatePageNumber.run(
-          -(index + 1),
-          pageId,
-          chapterId
-        )
+        // Depois aplicamos a numeração definitiva.
+        for (const [index, pageId] of normalizedIds.entries()) {
+          await pgQuery(`
+            UPDATE pages
+            SET page_number = $1
+            WHERE id = $2
+              AND chapter_id = $3
+          `, [
+            index + 1,
+            pageId,
+            chapterId,
+          ])
+        }
       }
-    )
 
-    // Depois aplicamos a numeração definitiva.
-    normalizedIds.forEach(
-      (pageId, index) => {
-        updatePageNumber.run(
-          index + 1,
-          pageId,
-          chapterId
-        )
-      }
-    )
-  })
-
-      reorderPages()
+      await reorderPages()
 
       res.json({
         success: true,
