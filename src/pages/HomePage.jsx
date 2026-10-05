@@ -193,6 +193,10 @@ function HomePage() {
         <p>
           Site e mangá "Luz Entre Sombras" — Autor: Paulo Kazuo Ito
         </p>
+
+        <p>
+          © 2026 Paulo Kazuo Ito — Todos os direitos reservados.
+        </p>
       </footer>
     </div>
   )
