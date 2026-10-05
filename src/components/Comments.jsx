@@ -175,12 +175,31 @@ function Comments({
             </strong>
 
             <time>
-              {new Date(
-                `${comment.created_at.replace(
-                  ' ',
-                  'T'
-                )}Z`
-              ).toLocaleString('pt-BR')}
+              {(() => {
+                const value =
+                  comment.created_at
+
+                const date =
+                  value instanceof Date
+                    ? value
+                    : new Date(value)
+
+                if (
+                  Number.isNaN(
+                    date.getTime()
+                  )
+                ) {
+                  return ''
+                }
+
+                return date.toLocaleString(
+                  'pt-BR',
+                  {
+                    dateStyle: 'short',
+                    timeStyle: 'short',
+                  }
+                )
+              })()}
             </time>
           </div>
 
