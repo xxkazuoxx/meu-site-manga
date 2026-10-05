@@ -191,7 +191,7 @@ function HomePage() {
         </p>
 
         <p>
-          Histórias originais para você ler.
+          Site e mangá "Luz Entre Sombras" — Autor: Paulo Kazuo Ito
         </p>
       </footer>
     </div>
