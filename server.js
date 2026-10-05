@@ -10,6 +10,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import path from 'path'
 import fs from 'fs'
 import { query as pgQuery } from './database-pg.js'
+import { v2 as cloudinary } from 'cloudinary'
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+})
 
 const app = express()
 const PORT = Number(process.env.PORT || 3001)
@@ -215,6 +222,22 @@ const stagingStorage = {
       cb(null)
     })
   },
+}
+
+async function uploadFileToCloudinary(filePath, mangaSlug, chapterSlug, pageNumber) {
+  const publicId = `mangas/${mangaSlug}/${chapterSlug}/page-${pageNumber}-${randomUUID()}`
+
+  const result = await cloudinary.uploader.upload(filePath, {
+    public_id: publicId,
+    resource_type: 'image',
+    overwrite: false,
+    unique_filename: false,
+  })
+
+  return {
+    url: result.secure_url,
+    publicId: result.public_id,
+  }
 }
 
 function cleanupStagedFiles(files = []) {
@@ -682,6 +705,7 @@ app.post(
       ? files
       : legacyFiles
     const installedFiles = []
+    const cloudinaryUploadedIds = []
     let databaseCommitted = false
 
     const reject = (status, error, details = {}) => {
@@ -788,33 +812,6 @@ app.post(
         )
       }
 
-      const chapterDirectory = ensureUploadDirectory(
-        chapter.manga_slug,
-        chapter.chapter_slug
-      )
-      const pagesToInsert = []
-
-      for (const [index, file] of uploadedFiles.entries()) {
-        const extension = extensions[index]
-        const installed = installStagedFile(
-          file.path,
-          chapterDirectory,
-          extension
-        )
-
-        installedFiles.push(installed.filePath)
-
-        const url =
-          `/manga-uploads/${chapter.manga_slug}/${chapter.chapter_slug}/${installed.filename}`
-
-        pagesToInsert.push({
-          filename: installed.filename,
-          url,
-        })
-
-        fs.unlinkSync(file.path)
-      }
-
       const nextPageResult = await pgQuery(`
         SELECT COALESCE(MAX(page_number), 0) + 1 AS next_page
         FROM pages
@@ -825,6 +822,29 @@ app.post(
         nextPageResult.rows[0].next_page
       )
 
+      const pagesToInsert = []
+
+      for (const [index, file] of uploadedFiles.entries()) {
+        const pageNumber = nextPageNumber + index
+
+        const uploaded = await uploadFileToCloudinary(
+          file.path,
+          chapter.manga_slug,
+          chapter.chapter_slug,
+          pageNumber
+        )
+
+        pagesToInsert.push({
+          filename: uploaded.publicId,
+          url: uploaded.url,
+          publicId: uploaded.publicId,
+        })
+
+        cloudinaryUploadedIds.push(uploaded.publicId)
+
+        fs.unlinkSync(file.path)
+      }
+
       const savedPages = []
 
       for (const [index, page] of pagesToInsert.entries()) {
@@ -834,14 +854,16 @@ app.post(
           INSERT INTO pages (
             chapter_id,
             page_number,
-            url
+            url,
+            public_id
           )
-          VALUES ($1, $2, $3)
+          VALUES ($1, $2, $3, $4)
           RETURNING id
         `, [
           chapterId,
           pageNumber,
           page.url,
+          page.publicId,
         ])
 
         savedPages.push({
@@ -873,9 +895,30 @@ app.post(
             }))
           )
 
+      let cloudinaryCleanupErrors = []
+
+      if (!databaseCommitted && cloudinaryUploadedIds.length > 0) {
+        for (const publicId of cloudinaryUploadedIds) {
+          try {
+            await cloudinary.uploader.destroy(publicId, {
+              resource_type: 'image',
+              invalidate: true,
+            })
+          } catch (cleanupError) {
+            cloudinaryCleanupErrors.push(cleanupError)
+            console.error(
+              'Falha ao remover upload do Cloudinary:',
+              publicId,
+              cleanupError
+            )
+          }
+        }
+      }
+
       if (
         cleanupErrors.length > 0 ||
-        installedCleanupErrors.length > 0
+        installedCleanupErrors.length > 0 ||
+        cloudinaryCleanupErrors.length > 0
       ) {
         console.error(
           'Falha ao limpar arquivos após upload não concluído.'
@@ -934,7 +977,9 @@ app.post(
 
     try {
       const pageResult = await pgQuery(`
-        SELECT id
+        SELECT
+          id,
+          public_id
         FROM pages
         WHERE url = $1
       `, [url])
@@ -950,8 +995,9 @@ app.post(
 
       let fileContents = null
       let fileExisted = uploadFile.exists
+      let cloudinaryDeleted = false
 
-      if (fileExisted) {
+      if (!page.public_id && fileExisted) {
         try {
           fileContents = fs.readFileSync(
             uploadFile.filePath
@@ -973,6 +1019,41 @@ app.post(
         }
       }
 
+      if (page.public_id) {
+        try {
+          const cloudinaryResult =
+            await cloudinary.uploader.destroy(
+              page.public_id,
+              {
+                resource_type: 'image',
+                invalidate: true,
+              }
+            )
+
+          if (
+            cloudinaryResult.result !== 'ok' &&
+            cloudinaryResult.result !== 'not found'
+          ) {
+            throw new Error(
+              `Cloudinary retornou resultado inesperado: ${cloudinaryResult.result}`
+            )
+          }
+
+          cloudinaryDeleted =
+            cloudinaryResult.result === 'ok'
+        } catch (error) {
+          console.error(
+            'Erro ao excluir página do Cloudinary:',
+            error
+          )
+
+          return res.status(500).json({
+            error:
+              'Não foi possível excluir a página do armazenamento.',
+          })
+        }
+      }
+
       let fileDeleted = false
 
       try {
@@ -989,7 +1070,7 @@ app.post(
           throw error
         }
 
-        if (fileExisted) {
+        if (!page.public_id && fileExisted) {
           try {
             fs.unlinkSync(uploadFile.filePath)
             fileDeleted = true
@@ -1003,6 +1084,7 @@ app.post(
         }
       } catch (error) {
         if (
+          !page.public_id &&
           fileContents &&
           !fs.existsSync(uploadFile.filePath)
         ) {
@@ -1035,6 +1117,7 @@ app.post(
         success: true,
         recordDeleted: true,
         fileDeleted,
+        cloudinaryDeleted,
       })
     } catch (error) {
       console.error(
@@ -1091,13 +1174,50 @@ app.delete(
       }
 
       const pagesResult = await pgQuery(`
-        SELECT url
+        SELECT
+          url,
+          public_id
         FROM pages
         WHERE chapter_id = $1
         ORDER BY page_number
       `, [chapterId])
 
       for (const page of pagesResult.rows) {
+        if (page.public_id) {
+          try {
+            const cloudinaryResult =
+              await cloudinary.uploader.destroy(
+                page.public_id,
+                {
+                  resource_type: 'image',
+                  invalidate: true,
+                }
+              )
+
+            if (
+              cloudinaryResult.result !== 'ok' &&
+              cloudinaryResult.result !== 'not found'
+            ) {
+              throw new Error(
+                `Cloudinary retornou resultado inesperado: ${cloudinaryResult.result}`
+              )
+            }
+          } catch (error) {
+            console.error(
+              'Erro ao excluir página do Cloudinary durante exclusão do capítulo:',
+              page.public_id,
+              error
+            )
+
+            return res.status(500).json({
+              error:
+                'Não foi possível excluir todas as páginas do armazenamento.',
+            })
+          }
+
+          continue
+        }
+
         if (
           typeof page.url !== 'string' ||
           !page.url.startsWith(
