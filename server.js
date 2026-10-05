@@ -952,29 +952,6 @@ app.post(
   async (req, res) => {
     const { url } = req.body
 
-    let uploadFile
-
-    try {
-      uploadFile = resolveUploadFile(url)
-    } catch (error) {
-      console.error(
-        'Erro ao validar caminho da página:',
-        error
-      )
-
-      return res.status(500).json({
-        error:
-          'Não foi possível validar o caminho do arquivo.',
-      })
-    }
-
-    if (!uploadFile) {
-      return res.status(400).json({
-        error:
-          'Endereço inválido ou fora da área permitida de uploads.',
-      })
-    }
-
     try {
       const pageResult = await pgQuery(`
         SELECT
@@ -993,8 +970,33 @@ app.post(
         })
       }
 
+      let uploadFile = null
+
+      if (!page.public_id) {
+        try {
+          uploadFile = resolveUploadFile(url)
+        } catch (error) {
+          console.error(
+            'Erro ao validar caminho da página:',
+            error
+          )
+
+          return res.status(500).json({
+            error:
+              'Não foi possível validar o caminho do arquivo.',
+          })
+        }
+
+        if (!uploadFile) {
+          return res.status(400).json({
+            error:
+              'Endereço inválido ou fora da área permitida de uploads.',
+          })
+        }
+      }
+
       let fileContents = null
-      let fileExisted = uploadFile.exists
+      let fileExisted = uploadFile?.exists ?? false
       let cloudinaryDeleted = false
 
       if (!page.public_id && fileExisted) {
