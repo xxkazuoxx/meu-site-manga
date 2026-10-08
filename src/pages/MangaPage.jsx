@@ -85,6 +85,17 @@ function MangaPage() {
           </div>
         </section>
 
+        <div className="manga-kofi-support">
+          <a
+            href="https://ko-fi.com/xxkazuoxx"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="kofi-button"
+          >
+            ❤️ Apoie Luz Entre Sombras
+          </a>
+        </div>
+
         <section className="chapters-section">
           <div className="chapters-header">
             <h2>Capítulos</h2>
