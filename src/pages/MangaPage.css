@@ -245,26 +245,3 @@
     gap: 14px;
   }
 }
-
-.manga-kofi-support {
-  display: flex;
-  justify-content: center;
-  margin: 24px 0 32px;
-}
-
-.kofi-button {
-  display: inline-block;
-  padding: 12px 22px;
-  border-radius: 10px;
-  background: #ff5e5b;
-  color: #ffffff;
-  font-weight: 700;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: transform 0.2s ease, opacity 0.2s ease;
-}
-
-.kofi-button:hover {
-  transform: scale(1.04);
-  opacity: 0.9;
-}
