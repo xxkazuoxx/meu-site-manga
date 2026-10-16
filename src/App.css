@@ -155,6 +155,9 @@ button {
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+
+  /* Um dedo move a página; dois dedos ficam disponíveis
+     para o pinch-to-zoom controlado pelo ReaderPage. */
   touch-action: pan-x pan-y;
 }
 
@@ -324,6 +327,16 @@ button {
 
   .page-viewport {
     padding: 12px;
+    overflow: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .page-container,
+  .manga-page {
+    -webkit-user-drag: none;
+    user-select: none;
   }
 
   .manga-page {

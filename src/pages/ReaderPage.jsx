@@ -43,6 +43,11 @@ function ReaderPage() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const viewerRef = useRef(null)
   const pageViewportRef = useRef(null)
+  const pinchRef = useRef({
+    active: false,
+    startDistance: 0,
+    startZoom: 1,
+  })
 
   useEffect(() => {
     async function loadMangas() {
@@ -181,6 +186,12 @@ function ReaderPage() {
     })
   }, [mangaSlug, chapterSlug])
 
+  const setZoomValue = useCallback((value) => {
+    updateZoom(() =>
+      Math.min(Math.max(Number(value.toFixed(2)), 0.5), 3)
+    )
+  }, [updateZoom])
+
   const increaseZoom = useCallback(() => {
     updateZoom((value) =>
       Math.min(Number((value + 0.25).toFixed(2)), 3)
@@ -196,6 +207,53 @@ function ReaderPage() {
   const resetZoom = useCallback(() => {
     updateZoom(() => 1)
   }, [updateZoom])
+
+  function getTouchDistance(touches) {
+    const first = touches[0]
+    const second = touches[1]
+
+    return Math.hypot(
+      second.clientX - first.clientX,
+      second.clientY - first.clientY
+    )
+  }
+
+  function handleTouchStart(event) {
+    if (event.touches.length !== 2) {
+      return
+    }
+
+    pinchRef.current = {
+      active: true,
+      startDistance: getTouchDistance(event.touches),
+      startZoom: zoom,
+    }
+  }
+
+  function handleTouchMove(event) {
+    if (
+      !pinchRef.current.active ||
+      event.touches.length !== 2
+    ) {
+      return
+    }
+
+    event.preventDefault()
+
+    const distance = getTouchDistance(event.touches)
+    const scale =
+      distance / pinchRef.current.startDistance
+
+    setZoomValue(
+      pinchRef.current.startZoom * scale
+    )
+  }
+
+  function handleTouchEnd(event) {
+    if (event.touches.length < 2) {
+      pinchRef.current.active = false
+    }
+  }
 
   function handleWheel(event) {
     if (event.ctrlKey) {
@@ -401,7 +459,14 @@ function ReaderPage() {
           ‹
         </button>
 
-        <div className="page-viewport" ref={pageViewportRef}>
+        <div
+          className="page-viewport"
+          ref={pageViewportRef}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchEnd}
+        >
           {pages.length > 0 ? (
             <div
               className="page-container"
